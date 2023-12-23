@@ -1,7 +1,7 @@
-import { Service, PlatformAccessory, CharacteristicValue } from "homebridge";
-import { VastraRadiatorValveHomebridgePlugin } from "./platform";
+import { CharacteristicValue, PlatformAccessory, Service } from "homebridge";
 import { RadiatorValve } from "vastra-radiator-valve";
 import PrefixLogger from "./logger";
+import { VastraRadiatorValveHomebridgePlugin } from "./platform";
 
 export class VastraRadiatorValvePlatformAccessory {
   private readonly log = new PrefixLogger(
@@ -9,19 +9,24 @@ export class VastraRadiatorValvePlatformAccessory {
     this.getMacAddress()
   );
 
+  private valve?: RadiatorValve;
   private thermostatService!: Service;
   private currentTemperature = 0;
-  private currentTemperatureUpdateIntervalId?: NodeJS.Timeout;
   private targetTemperature = 0;
+  private temperatureUpdateInterval?: NodeJS.Timeout;
+  private isUpdatingTargetTemperature = false;
 
   constructor(
-    private readonly platform: VastraRadiatorValveHomebridgePlugin,
-    private readonly accessory: PlatformAccessory,
-    private readonly valve: RadiatorValve
+    public readonly platform: VastraRadiatorValveHomebridgePlugin,
+    public readonly accessory: PlatformAccessory,
+    valve?: RadiatorValve
   ) {
     this.configureInformationService();
     this.configureThermostatService();
-    this.startPollingTask();
+
+    if (valve) {
+      this.setValve(valve);
+    }
   }
 
   private configureInformationService() {
@@ -34,7 +39,7 @@ export class VastraRadiatorValvePlatformAccessory {
       )
       .setCharacteristic(
         this.platform.Characteristic.SerialNumber,
-        "Default-Serial"
+        this.getSerialNumber()
       );
   }
 
@@ -50,83 +55,128 @@ export class VastraRadiatorValvePlatformAccessory {
       )
       .setCharacteristic(
         this.platform.Characteristic.CurrentHeatingCoolingState,
-        this.platform.Characteristic.CurrentHeatingCoolingState.HEAT
-      )
-      .setCharacteristic(
-        this.platform.Characteristic.TemperatureDisplayUnits,
-        this.platform.Characteristic.TemperatureDisplayUnits.CELSIUS
+        this.platform.Characteristic.CurrentHeatingCoolingState.OFF
       );
 
     this.thermostatService
       .getCharacteristic(this.platform.Characteristic.TargetHeatingCoolingState)
-      .onSet(this.handleTargetHeatingCoolingStateSet)
-      .onGet(this.handleTargetHeatingCoolingStateGet);
+      .onSet(this.setTargetHeatingCoolingState)
+      .onGet(this.getTargetHeatingCoolingState);
 
     this.thermostatService
       .getCharacteristic(this.platform.Characteristic.CurrentTemperature)
-      .onGet(this.handleCurrentTemperatureGet);
+      .onGet(this.getCurrentTemperature);
 
     this.thermostatService
       .getCharacteristic(this.platform.Characteristic.TargetTemperature)
-      .onSet(this.handleTargetTemperatureSet)
-      .onGet(this.handleTargetTemperatureGet);
+      .onSet(this.setTargetTemperature)
+      .onGet(this.getTargetTemperature);
 
-    this.valve.getTargetTemperature().then((targetTemperature) => {
-      this.targetTemperature = targetTemperature;
-    });
+    this.thermostatService
+      .getCharacteristic(this.platform.Characteristic.TemperatureDisplayUnits)
+      .onSet(this.setTemperatureDisplayUnits)
+      .onGet(this.getTemperatureDisplayUnits);
   }
 
-  private startPollingTask() {
-    this.currentTemperatureUpdateIntervalId = setInterval(async () => {
-      this.log.info(`Polling temperature`);
-
-      this.currentTemperature = await this.valve.getCurrentTemperature();
+  private async pollTemperatures() {
+    try {
+      this.currentTemperature = await this.valve!.getCurrentTemperature();
       this.thermostatService.updateCharacteristic(
         this.platform.Characteristic.CurrentTemperature,
         this.currentTemperature
       );
 
-      this.targetTemperature = await this.valve.getTargetTemperature();
-      this.thermostatService.updateCharacteristic(
-        this.platform.Characteristic.TargetTemperature,
-        this.targetTemperature
-      );
+      if (!this.isUpdatingTargetTemperature) {
+        this.targetTemperature = await this.valve!.getTargetTemperature();
+        this.thermostatService.updateCharacteristic(
+          this.platform.Characteristic.TargetTemperature,
+          this.targetTemperature
+        );
+      }
+    } catch (error) {
+      this.log.error("Failed to poll temperatures");
+      this.log.error(String(error));
+    }
+  }
+
+  private async startPollingTask() {
+    if (!this.valve) {
+      return;
+    }
+
+    await this.pollTemperatures();
+
+    this.temperatureUpdateInterval = setInterval(() => {
+      this.pollTemperatures();
     }, 10000);
 
     this.platform.api.on("shutdown", () => {
-      clearInterval(this.currentTemperatureUpdateIntervalId);
+      clearInterval(this.temperatureUpdateInterval);
     });
   }
 
-  private handleCurrentTemperatureGet = () => {
+  private getCurrentTemperature = () => {
     return Math.max(this.currentTemperature, 10);
   };
 
-  private handleTargetTemperatureSet = async (value: CharacteristicValue) => {
+  private setTargetTemperature = async (value: CharacteristicValue) => {
+    const { HapStatusError, HAPStatus } = this.platform.api.hap;
+    if (!this.valve) {
+      throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+    if (this.isUpdatingTargetTemperature) {
+      throw new HapStatusError(HAPStatus.RESOURCE_BUSY);
+    }
+
+    this.isUpdatingTargetTemperature = true;
     try {
       await this.valve.setTargetTemperature(value as number);
       this.targetTemperature = value as number;
       this.log.debug(`Target temperature set to ` + value);
     } catch (error) {
       this.log.error(`Failed to set target temperature: ` + String(error));
-
-      const { HapStatusError, HAPStatus } = this.platform.api.hap;
       throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    } finally {
+      this.isUpdatingTargetTemperature = false;
     }
   };
 
-  private handleTargetTemperatureGet = () => {
+  private getTargetTemperature = () => {
     return Math.max(this.targetTemperature, 10);
   };
 
-  private handleTargetHeatingCoolingStateSet = () => {
+  private setTargetHeatingCoolingState = () => {
     const { HapStatusError, HAPStatus } = this.platform.api.hap;
     throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
   };
 
-  private handleTargetHeatingCoolingStateGet = () => {
-    return this.platform.Characteristic.TargetHeatingCoolingState.AUTO;
+  private getTargetHeatingCoolingState = () => {
+    return this.valve
+      ? this.platform.Characteristic.TargetHeatingCoolingState.AUTO
+      : this.platform.Characteristic.TargetHeatingCoolingState.OFF;
   };
+
+  private setTemperatureDisplayUnits = () => {
+    const { HapStatusError, HAPStatus } = this.platform.api.hap;
+    throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+  };
+
+  private getTemperatureDisplayUnits = () => {
+    return this.platform.Characteristic.TemperatureDisplayUnits.CELSIUS;
+  };
+
+  public setValve(valve: RadiatorValve) {
+    this.valve = valve;
+    this.thermostatService.updateCharacteristic(
+      this.platform.Characteristic.CurrentHeatingCoolingState,
+      this.platform.Characteristic.CurrentHeatingCoolingState.HEAT
+    );
+    this.startPollingTask();
+  }
+
+  private getSerialNumber() {
+    return this.accessory.context.serialNumber ?? "Unknown";
+  }
 
   private getMacAddress() {
     return this.accessory.context.address;
