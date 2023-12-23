@@ -1,0 +1,9 @@
+{
+  "pluginAlias": "HomebridgeVastraRadiatorValve",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {}
+  }
+}
