@@ -10,8 +10,7 @@ import {
 } from "homebridge";
 import {
   NobleBluetoothCentral,
-  RadiatorValves,
-  Logger as VastraLogger,
+  RadiatorValveScanner,
 } from "vastra-radiator-valve";
 import { VastraRadiatorValvePlatformAccessory } from "./radiatorValveAccessory";
 import { PLATFORM_NAME, PLUGIN_NAME } from "./settings";
@@ -23,7 +22,7 @@ export class VastraRadiatorValveHomebridgePlugin
   public readonly Characteristic: typeof Characteristic =
     this.api.hap.Characteristic;
 
-  private radiatorValves?: RadiatorValves;
+  private scanner?: RadiatorValveScanner;
 
   public readonly accessories: VastraRadiatorValvePlatformAccessory[] = [];
 
@@ -37,7 +36,7 @@ export class VastraRadiatorValveHomebridgePlugin
     });
 
     this.api.on("shutdown", () => {
-      this.radiatorValves?.dispose();
+      this.scanner?.disconnectAll();
     });
   }
 
@@ -49,21 +48,12 @@ export class VastraRadiatorValveHomebridgePlugin
   }
 
   startDiscovering() {
-    this.radiatorValves = new RadiatorValves(new NobleBluetoothCentral(), {
-      logger: new VastraLogger(false),
+    this.scanner = new RadiatorValveScanner(new NobleBluetoothCentral(), {
+      verbose: false,
       raspberryFix: true,
     });
-    this.radiatorValves.startScanning(async (valve) => {
-      try {
-        await valve.connect();
-      } catch (error) {
-        this.log.error(
-          `Failed to open connection to ${valve.peripheral.address}.`,
-          error
-        );
-        return;
-      }
 
+    this.scanner.on("connected", async (valve) => {
       const uuid = this.api.hap.uuid.generate(valve.peripheral.address);
       const existingAccessory = this.accessories.find(
         (accessory) => accessory.accessory.UUID === uuid
@@ -78,7 +68,7 @@ export class VastraRadiatorValveHomebridgePlugin
           uuid,
           Categories.THERMOSTAT
         );
-        accessory.context.serialNumber = valve.getSerialNumber();
+        accessory.context.serialNumber = await valve.getSerialNumber();
         accessory.context.address = valve.peripheral.address;
 
         this.accessories.push(
@@ -90,5 +80,7 @@ export class VastraRadiatorValveHomebridgePlugin
         ]);
       }
     });
+
+    this.scanner.start();
   }
 }

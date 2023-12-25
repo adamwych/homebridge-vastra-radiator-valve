@@ -1,7 +1,7 @@
 {
   "displayName": "Vastra Radiator Valve",
   "name": "homebridge-vastra-radiator-valve",
-  "version": "1.0.2",
+  "version": "1.2.0",
   "description": "Homebridge integration for Vastra's radiator valves",
   "license": "MIT",
   "author": {
@@ -30,7 +30,7 @@
     "homebridge-plugin"
   ],
   "dependencies": {
-    "vastra-radiator-valve": "^1.1.1"
+    "vastra-radiator-valve": "^1.2.1"
   },
   "devDependencies": {
     "@types/node": "^18.16.20",
